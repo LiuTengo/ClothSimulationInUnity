@@ -1,0 +1,118 @@
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel CalculatePosition;
+#pragma kernel CalculateVelocity;
+
+static float3 G = float3(0,-9.8,0);
+
+static int thread = 6;
+float damping;//衰减系数
+float springK; //弹性系数
+float mass;//顶点质量
+float dt; //间隔时间
+int edgeCount;//边顶点数
+float3 originalLength;
+//ball
+float4 ballInfo;
+
+static uint2 SpringDirs[12] = 
+{
+    {1,0},{0,1},
+    {-1,0},{0,-1},//
+    {-1,-1},{-1,1},
+    {1,1},{1,-1},//
+    {-2,0},{2,0},
+    {0,2},{0,-2},
+};
+
+RWStructuredBuffer<float3> positionBuffer;
+RWStructuredBuffer<float3> velocityBuffer;
+
+uint GetIndex(uint2 id)
+{
+    return id.y*edgeCount+id.x;  
+}
+
+bool isValidateId(uint2 id)
+{
+    return id.x>=0 && id.x<edgeCount && id.y>=0 && id.y<edgeCount;
+}
+
+static float3 getSpring(float3 p,float3 q,uint springType){
+    float3 dp = p - q;
+    float len = length(dp);
+    float restL = originalLength[springType];
+    return dp * (springK * (restL * rcp(len) - 1));
+}
+
+static float3 calculateF(uint2 id,float3 position,float3 velocity){
+    uint index = GetIndex(id);
+    float3 f = float3(0,0,0);
+    //弹性力求和
+    for(uint i = 0; i < 12; i ++){
+        uint2 nId = id + SpringDirs[i];
+        uint nIndex = GetIndex(nId);
+        if(isValidateId(nId)){
+            float3 nPos = positionBuffer[nIndex];
+            f += getSpring(position,nPos,i / 4);
+        }
+    }
+    //阻尼力
+    float3 fd = -damping * velocity;
+    f += fd;
+
+    //重力
+    float3 fg = float3(0,-9.8,0) * mass;
+    f += fg;
+
+    return f;
+}
+
+static float3 calculateF(uint2 id){
+    uint index = GetIndex(id);
+    return calculateF(id,positionBuffer[index],velocityBuffer[index]);
+}
+
+static void CollisionDetection(uint index)
+{
+    float3 pos = positionBuffer[index];
+    float3 ballCenter = ballInfo.xyz;
+    float ballRadius = ballInfo.w;
+    float dis = distance(pos,ballCenter)-ballRadius;
+    if(dis<0)
+    {
+        float3 normal = normalize(pos-ballCenter);
+        pos = pos - dis*normal;
+
+        float3 v = velocityBuffer[index];
+        v -= normal*dot(v,normal);
+
+        velocityBuffer[index] = v;
+        positionBuffer[index] = pos;
+    }
+}
+
+[numthreads(thread,thread,1)]
+void CalculateVelocity(uint3 id : SV_DispatchThreadID)
+{
+    uint index = GetIndex(id);
+    float3 f = calculateF(id);
+    float3 a = f * rcp(mass);
+    float3 velocity = velocityBuffer[index];
+    velocity = velocity + a * dt;
+    velocityBuffer[index] = velocity;
+}
+
+[numthreads(thread,thread,1)]
+void CalculatePosition(uint3 id : SV_DispatchThreadID)
+{
+    if(id.y==0 && (id.x==0||id.x==edgeCount-1))
+    {
+        return;
+    }
+
+    uint index = GetIndex(id.xy);
+    
+    positionBuffer[index] += velocityBuffer[index] *dt;
+    CollisionDetection(index);
+}
+
