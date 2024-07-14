@@ -1,0 +1,44 @@
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel TestKernelAdd
+#pragma kernel TestKernelSubstract
+#pragma kernel TestKernelUpdateB
+#pragma kernel TestKernelInitial
+
+struct tempData
+{
+    int i,j;
+};
+
+RWStructuredBuffer<int> a;
+RWStructuredBuffer<int> b;
+RWStructuredBuffer<tempData> temp;
+
+[numthreads(1,1,1)]
+void TestKernelAdd (uint3 id : SV_DispatchThreadID)
+{
+    tempData t = temp[id.x];
+    InterlockedAdd(a[t.i],2);
+    InterlockedAdd(a[t.j],2);
+}
+
+[numthreads(1,1,1)]
+void TestKernelSubstract (uint3 id : SV_DispatchThreadID)
+{
+    tempData t = temp[id.x];
+    InterlockedAdd(a[t.i],-1);
+    InterlockedAdd(a[t.j],-1);
+}
+
+[numthreads(1,1,1)]
+void TestKernelUpdateB (uint3 id : SV_DispatchThreadID)
+{
+    int x = a[id.x];
+    InterlockedAdd(b[id.x],2*x);
+}
+
+[numthreads(1,1,1)]
+void TestKernelInitial (uint3 id : SV_DispatchThreadID)
+{
+    b[id.x] = 0;
+    a[id.x] = 0;
+}

@@ -1,0 +1,167 @@
+//
+#pragma kernel PredictPosition
+#pragma kernel InitialStrainLimiting
+#pragma kernel ClothConstrainLimiting
+#pragma kernel UpdatePositionAndVelocity
+#pragma kernel CollisionHandling
+
+struct Edge
+{
+    int i,j;
+    float restLength;
+};
+
+struct BallInfo
+{
+    float3 center;
+    float radius;
+};
+
+//布料信息
+int totalVertex;
+//物理更新信息
+float3 forceField;
+float3 g;
+float dt;
+float damping;
+float thickness;
+
+//Buffer
+RWStructuredBuffer<float3> position;
+RWStructuredBuffer<float3> velocity;
+RWStructuredBuffer<Edge> edges;
+RWStructuredBuffer<int> pin;
+
+RWStructuredBuffer<int> sum_n;
+RWStructuredBuffer<float3> sum_p;
+
+//CollisionBuffer
+int sphereLength;
+RWStructuredBuffer<BallInfo> sphere;
+
+//Helper Buffer
+RWStructuredBuffer<uint3> deltaIntBuffer;
+
+void atomic_add(int deltaIndex,float deltaVal,int axis)
+{
+    uint i_val = asuint(deltaVal);
+    uint temp0 = 0;
+    uint temp1;
+
+    [allow_uav_condition]
+    while(true)
+    {
+        InterlockedCompareExchange(deltaIntBuffer[deltaIndex][axis],temp0,i_val,temp1);
+
+        if(temp0 == temp1)
+        {
+            break;
+        }
+
+        temp0 = temp1;
+        i_val = asuint(deltaVal+asfloat(temp1));
+    }
+    return;
+}
+
+[numthreads(16,1,1)]
+void PredictPosition(uint3 id : SV_DispatchThreadID)
+{
+    if(id.x >= totalVertex) return;
+    if(pin[id.x]) return;
+    
+    //float mass = masses[index];
+    //update velocity
+    float3 v = velocity[id.x];
+    float3 a = g + forceField/1.0f; ///mass;
+    v += a*dt;
+    v *= damping;
+    
+    //predict position
+    float3 p = position[id.x];
+    p += v*dt;
+    
+    position[id.x] = p;
+    velocity[id.x] = v;
+}
+
+[numthreads(16,1,1)]
+void InitialStrainLimiting(uint3 id : SV_DispatchThreadID)
+{
+    if(id.x >= totalVertex) return;
+    sum_n[id.x] = 0;
+}
+
+[numthreads(16,1,1)]
+void ClothConstrainLimiting(uint3 id : SV_DispatchThreadID)
+{
+    Edge e = edges[id.x];
+    
+    int i = e.i;
+    int j = e.j;
+
+    float3 A = position[i] + position[j];
+    float3 B = e.restLength * normalize(position[i] - position[j]);
+
+    float3 a = 0.5f * (A+B);
+    float3 b = 0.5f * (A-B);
+    
+    atomic_add(i,a.x,0);
+    atomic_add(i,a.y,1);
+    atomic_add(i,a.z,2);
+    
+    atomic_add(j,b.x,0);
+    atomic_add(j,b.y,1);
+    atomic_add(j,b.z,2);
+
+    InterlockedAdd(sum_n[i],1);
+    InterlockedAdd(sum_n[j],1);
+}
+
+[numthreads(16,1,1)]
+void UpdatePositionAndVelocity(uint3 id : SV_DispatchThreadID)
+{
+    if(id.x >= totalVertex) return;
+    if(pin[id.x])
+    {
+        deltaIntBuffer[id.x] = uint3(0,0,0);
+        return;
+    }
+    
+    if(sum_n[id.x]>0)
+    {
+        sum_p[id.x].x = asfloat(deltaIntBuffer[id.x].x);
+        sum_p[id.x].y = asfloat(deltaIntBuffer[id.x].y);
+        sum_p[id.x].z = asfloat(deltaIntBuffer[id.x].z);
+    }
+    
+    float3 A = (0.2f*position[id.x]+sum_p[id.x])/(0.2f+(float)sum_n[id.x]);
+
+    deltaIntBuffer[id.x] = uint3(0,0,0);
+    
+    velocity[id.x] += (A-position[id.x])/dt;
+    position[id.x] = A;    
+}
+
+[numthreads(16,1,1)]
+void CollisionHandling(uint3 id : SV_DispatchThreadID)
+{
+    if(pin[id.x])return;
+
+    for(int i=0;i<sphereLength;i++)
+    {
+        float3 pos = position[id.x];
+        float3 ballCenter = sphere[i].center;
+        float ballRadius = sphere[i].radius;
+        float dis = distance(pos,ballCenter)-ballRadius-thickness;
+        if(dis<0)
+        {
+            float3 normal = normalize(pos-ballCenter);
+            pos = pos - dis*normal;
+            float3 v = velocity[id.x];
+            v -= normal*dot(v,normal);
+            velocity[id.x] = v;
+            position[id.x] = pos;
+        }   
+    }
+}

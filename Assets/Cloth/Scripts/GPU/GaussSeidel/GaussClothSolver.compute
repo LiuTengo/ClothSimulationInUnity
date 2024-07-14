@@ -1,0 +1,258 @@
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel InitSimulation
+#pragma kernel DistanceConstrain
+#pragma kernel BendingConstrain
+#pragma kernel AddCollisionConstrain
+#pragma kernel CollisionConstrain
+#pragma kernel UpdatePositionAndVelocity
+
+struct Edge
+{
+    int i, j;
+    float restLength;
+    
+    int nT1;
+    int nT2;
+
+    int nv1;
+    int nv2;
+    float restAngle;
+};
+
+struct SphereRigidBody
+{
+    float3 center;
+    float radius;
+};
+
+struct ContactInfo
+{
+    float3 normal;
+    float3 position;
+};
+
+//布料信息
+uint totalVertices;
+uint totalEdges;
+
+//物理更新信息
+float3 forceField;
+float3 g;
+float dt;
+uint iterateCount;
+uint s;
+//damper & stiffness & thickness
+float damper;
+float stiffness;
+float thickness;
+
+//Buffer
+RWStructuredBuffer<float3> position;
+RWStructuredBuffer<float3> predictPosition;
+RWStructuredBuffer<float3> velocity;
+RWStructuredBuffer<Edge> edges;
+RWStructuredBuffer<float> masses;
+RWStructuredBuffer<int> pin; //0-not pin point 1-pin point 2-collision point
+RWStructuredBuffer<ContactInfo> collideInfo; //
+//Collider
+int sphereBufferLength; //
+RWStructuredBuffer<SphereRigidBody> sphere_buffer; //
+//Helper Buffer
+RWStructuredBuffer<uint3> deltaIntBuffer;
+
+void atomic_add(int deltaIndex,float deltaVal,int axis)
+{
+    uint i_val = asuint(deltaVal);
+    uint temp0 = 0;
+    uint temp1;
+
+    [allow_uav_condition]
+    while(true)
+    {
+        InterlockedCompareExchange(deltaIntBuffer[deltaIndex][axis],temp0,i_val,temp1);
+
+        if(temp0 == temp1)
+        {
+            break;
+        }
+
+        temp0 = temp1;
+        i_val = asuint(deltaVal+asfloat(temp1));
+    }
+    return;
+}
+
+[numthreads(16,1,1)]
+void InitSimulation(uint3 id : SV_DispatchThreadID)
+{
+    if(id.x>=totalVertices) return;
+    if(pin[id.x]==1) return;
+    
+    float3 v = velocity[id.x];
+    float3 p = position[id.x];
+    float3 a = g + forceField/masses[id.x];
+
+    v += a*dt;
+    v *= max(0.0f,1-(damper*dt)/masses[id.x]);
+    p += v* dt;
+
+    velocity[id.x] = v;
+    predictPosition[id.x] = p;
+}
+
+[numthreads(16,1,1)]
+void DistanceConstrain(uint3 id : SV_DispatchThreadID)
+{
+    if(id.x>=totalEdges) return;
+    
+    float di = 1.0f / (iterateCount - s);
+    float p = 1.0f / iterateCount;
+    float k = 1-pow(abs(1-stiffness),p);
+    
+    Edge e = edges[id.x];
+    float3 p0 = predictPosition[e.i];
+    float3 p1 = predictPosition[e.j];
+    float m0 = masses[e.i]; //这里质量没取倒数，在下面计算修正时把质量那部分化简了。
+    float m1 = masses[e.j];
+    float3 distV = p1 - p0;
+    float3 normal = normalize(distV);
+    float l = length(distV);
+    float err = l - e.restLength;
+    float3 correct;
+    correct = normal * (k * err);
+    float totalM = m0 + m1;
+
+    float3 a = (correct * (di * m1) / totalM);
+    float3 b = -(correct * (di * m0) / totalM);
+    atomic_add(e.i,a.x,0);
+    atomic_add(e.i,a.y,1);
+    atomic_add(e.i,a.z,2);
+
+    atomic_add(e.j,b.x,0);
+    atomic_add(e.j,b.y,1);
+    atomic_add(e.j,b.z,2);
+}
+
+[numthreads(16,1,1)]
+void BendingConstrain(uint3 id : SV_DispatchThreadID)
+{
+    if(id.x>=totalEdges) return;
+    
+    float di = 1.0f / (iterateCount - s);
+    float p = 1.0f / iterateCount;
+    float k = 1 - pow(abs(1 - stiffness), p);
+    
+    Edge edge = edges[id.x];
+            
+    if(!(edge.nT2>=0)) return;
+            
+    float3 p1 = predictPosition[edge.i];
+    float3 p2 = predictPosition[edge.j] - p1;
+    float3 p3 = predictPosition[edge.nv1] - p1;
+    float3 p4 = predictPosition[edge.nv2] - p1;
+
+    float3 n1 = normalize(cross(p2, p3));
+    float3 n2 = normalize(cross(p2, p4));
+
+    float d = dot(n1, n2);
+
+    float n1M = length(cross(p2, p3));
+    float n2M = length(cross(p2, p4));
+
+    float3 q4 = (cross(p2, n1) + cross(n2, p2) * d) / n2M;
+    float3 q3 = (cross(p2, n2) + cross(n1, p2) * d) / n1M;
+    float3 q2 = -(cross(p3, n2) + cross(n1, p3) * d) / n1M -
+                 (cross(p4, n1) + cross(n2, p4) * d) / n2M;
+    float3 q1 = -q2 - q3 - q4;
+
+    float w1 = 1.0f / masses[edge.i];
+    float w2 = 1.0f / masses[edge.j];
+    float w3 = 1.0f / masses[edge.nv1];
+    float w4 = 1.0f / masses[edge.nv2];
+
+    float totalWeight = w1 * pow(length(q1),2)+ w2 * pow(length(q2),2) + w3 * pow(length(q3),2) + w4 * pow(length(q4),2);
+    totalWeight = max(0.01f, totalWeight);
+
+    float arcd = -(sqrt(1 - d * d) * (acos(d) - edge.restAngle)) / totalWeight;
+
+    if (!isnan(arcd))
+    {
+        float3 a = (q1 * (di * k * (w1 * arcd)));
+        atomic_add(edge.i,a.x,0);
+        atomic_add(edge.i,a.y,1);
+        atomic_add(edge.i,a.z,2);
+        float3 b = (q2 * (di * k * (w2 * arcd)));
+        atomic_add(edge.j,b.x,0);
+        atomic_add(edge.j,b.y,1);
+        atomic_add(edge.j,b.z,2);
+        float3 c = (q3 * (di * k * (w3 * arcd)));
+        atomic_add(edge.nv1,c.x,0);
+        atomic_add(edge.nv1,c.y,1);
+        atomic_add(edge.nv1,c.z,2);
+        float3 f = (q4 * (di * k * (w4 * arcd)));
+        atomic_add(edge.nv2,f.x,0);
+        atomic_add(edge.nv2,f.y,1);
+        atomic_add(edge.nv2,f.z,2);
+    }
+}
+
+bool InSphere(SphereRigidBody sphere,float3 p)
+{
+    float dis = distance(p,sphere.center)-thickness;
+    return dis<=sphere.radius;
+}
+
+[numthreads(16,1,1)]
+void AddCollisionConstrain(uint3 id:SV_DispatchThreadID)
+{
+    if(id.x>=totalVertices) return;
+    if(pin[id.x]==1) return;
+    
+    for(int i = 0;i<sphereBufferLength;i++)
+    {
+        float3 p = predictPosition[id.x];
+        SphereRigidBody sphere = sphere_buffer[i];
+        if(InSphere(sphere,p))
+        {
+            pin[id.x] = 2;
+
+            ContactInfo info;
+            info.normal = normalize(p-sphere.center);
+            info.position = info.normal*sphere.radius+sphere.center;
+            collideInfo[id.x] =info;
+            
+            return;
+        }
+        pin[id.x] = 0;
+    }
+}
+
+[numthreads(16,1,1)]
+void CollisionConstrain(uint3 id : SV_DispatchThreadID)
+{
+    if(id.x>=totalVertices) return;
+    if(pin[id.x]!=2) return;
+    
+    float3 p = predictPosition[id.x];
+    ContactInfo info = collideInfo[id.x];
+    float3 deltaP = (info.position - p)*(s*1.f/iterateCount);
+    p += deltaP;
+    predictPosition[id.x] = p;
+    velocity[id.x] = (predictPosition[id.x]-position[id.x])/dt;
+}
+
+[numthreads(16,1,1)]
+void UpdatePositionAndVelocity(uint3 id : SV_DispatchThreadID)
+{
+    if(id.x>=totalVertices) return;
+    if(pin[id.x]==1) return;
+    
+    predictPosition[id.x].x += asfloat(deltaIntBuffer[id.x].x);
+    predictPosition[id.x].y += asfloat(deltaIntBuffer[id.x].y);
+    predictPosition[id.x].z += asfloat(deltaIntBuffer[id.x].z);
+
+    deltaIntBuffer[id.x] = uint3(0,0,0);
+    
+    velocity[id.x] = (predictPosition[id.x]-position[id.x])/dt;
+    position[id.x] = predictPosition[id.x];
+}

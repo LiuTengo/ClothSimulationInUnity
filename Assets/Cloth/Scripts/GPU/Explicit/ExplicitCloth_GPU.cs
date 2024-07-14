@@ -1,8 +1,15 @@
 using System;
 using UnityEngine;
 
-public class ClothExplicit : MonoBehaviour
+/// <summary>
+/// Explicit Euler Method Cloth Simulation
+/// Basic Method
+/// </summary>
+public class ExplicitCloth_GPU : MonoBehaviour
 {
+    private static int threadX = 8;
+    private static int threadY = 8;
+    
     //Effector
     [SerializeField] private int timeStep = 5;
     [SerializeField] private float mass = 1.0f;
@@ -31,7 +38,8 @@ public class ClothExplicit : MonoBehaviour
     //ball
     private Mesh ballMesh;
     private float ballRadius;
-    
+
+    private int groupSize;
     private void Start()
     {
         InitMeshAndArray();
@@ -41,49 +49,6 @@ public class ClothExplicit : MonoBehaviour
         ballMesh = ball.GetComponent<MeshFilter>().mesh;
         ballRadius = ball.transform.localScale.x/2;
     }
-
-    #region  QuickSort
-
-    void Quick_Sort(ref int[] a, int l, int r)
-    {
-        int j;
-        if(l<r)
-        {
-            j=Quick_Sort_Partition(ref a, l, r);
-            Quick_Sort (ref a, l, j-1);
-            Quick_Sort (ref a, j+1, r);
-        }
-    }
-    
-    int  Quick_Sort_Partition(ref int[] a, int l, int r)
-    {
-        int pivot_0, pivot_1, i, j;
-        pivot_0 = a [l * 2 + 0];
-        pivot_1 = a [l * 2 + 1];
-        i = l;
-        j = r + 1;
-        while (true) 
-        {
-            do ++i; while( i<=r && (a[i*2]<pivot_0 || a[i*2]==pivot_0 && a[i*2+1]<=pivot_1));
-            do --j; while(  a[j*2]>pivot_0 || a[j*2]==pivot_0 && a[j*2+1]> pivot_1);
-            if(i>=j)	break;
-            Swap(ref a[i*2], ref a[j*2]);
-            Swap(ref a[i*2+1], ref a[j*2+1]);
-        }
-        Swap (ref a [l * 2 + 0], ref a [j * 2 + 0]);
-        Swap (ref a [l * 2 + 1], ref a [j * 2 + 1]);
-        return j;
-    }
-    
-    void Swap(ref int a, ref int b)
-    {
-        int temp = a;
-        a = b;
-        b = temp;
-    }
-
-    #endregion
-
     private void InitMeshAndArray()
     {
         mesh = GetComponent<MeshFilter>().mesh;
@@ -103,12 +68,12 @@ public class ClothExplicit : MonoBehaviour
             for (int x=0;x<edgeVertices;x++)
             {
                 Position[y * edgeVertices + x] = 
-                    new Vector3(5.0f-10.0f*x/(edgeVertices-1),0.0f,5.0f-10.0f*y/(edgeVertices-1));
+                    new Vector3(5.0f-10.0f*x/(edgeVertices-1),0.0f,3.0f-6.0f*y/(edgeVertices-1));
                 uv[y * edgeVertices + x] = new Vector2(x/(edgeVertices-1.0f),y/(edgeVertices-1.0f));
             }
         }
 
-        float spacing = new Vector3(10.0f / (edgeVertices - 1),0,10.0f / (edgeVertices - 1)).magnitude;
+        float spacing = new Vector3(10.0f / (edgeVertices - 1),0,6.0f / (edgeVertices - 1)).magnitude;
         originalLength = new Vector3(spacing,spacing*Mathf.Sqrt(2),spacing*2);
     
         int t = 0;
@@ -135,6 +100,8 @@ public class ClothExplicit : MonoBehaviour
         {
             Velocity[i] = Vector3.zero;
         }
+
+        groupSize = edgeVertices / threadX;
     }
     
     private void InitBuffer()
@@ -172,26 +139,25 @@ public class ClothExplicit : MonoBehaviour
     private void Update()
     {
         float dt = Time.deltaTime / timeStep;
-        
+        computeShader.SetFloat("dt",dt);
         for (int i=0;i<timeStep;i++)
         {
-            computeShader.SetFloat("dt",dt);
-            
             Vector4 ballInfo = ball.transform.position;
             ballInfo.w = 1;
-
             Matrix4x4 mat= WorldToClothObject();
             ballInfo = mat * ballInfo;
             ballInfo.w = ballRadius;
-            
             computeShader.SetVector("ballInfo",ballInfo);
             
-            computeShader.Dispatch(kernelUpdateVelocity,2,2,1);
-            computeShader.Dispatch(kernelUpdatePosition,2,2,1);
+            computeShader.Dispatch(kernelUpdatePosition,groupSize,groupSize,1);
+            computeShader.Dispatch(kernelUpdateVelocity,groupSize,groupSize,1);
+            
             positionBuffer.GetData(Position);
             
             mesh.vertices = Position;
             mesh.RecalculateNormals();
+            
+            //Graphics.DrawMeshNow(mesh, Matrix4x4.identity, 0);
         }
     }
 

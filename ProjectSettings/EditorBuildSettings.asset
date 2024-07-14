@@ -4,5 +4,14 @@
 EditorBuildSettings:
   m_ObjectHideFlags: 0
   serializedVersion: 2
-  m_Scenes: []
+  m_Scenes:
+  - enabled: 1
+    path: Assets/Cloth/Scene/ClothSimulationPBD_Jacobi.unity
+    guid: e06430dee82ded940a5a0de01a42ebc0
+  - enabled: 0
+    path: Assets/Cloth/Scene/ClothSimulationPBD_Gauss.unity
+    guid: b2b1ea1b8bdb7594fa01933aebf29710
+  - enabled: 0
+    path: Assets/Cloth/Scene/ClothSimulationExplicit.unity
+    guid: 40f49ddce31fbf04c81b150ab90bdca6
   m_configObjects: {}

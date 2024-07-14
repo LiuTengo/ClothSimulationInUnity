@@ -1,17 +1,11 @@
 ﻿using UnityEngine;
-using System.Collections;
 
-public class sphere_motion : MonoBehaviour {
+public class SphereMotion : MonoBehaviour {
 
 	bool 	pressed=false;
 	bool 	sphere_move=false;
 	Vector3 offset;
 
-	// Use this for initialization
-	void Start () 
-	{
-	}
-	
 	// Update is called once per frame
 	void Update () 
 	{
